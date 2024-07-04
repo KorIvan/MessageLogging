@@ -3,25 +3,52 @@ package org.example.service;
 import com.hazelcast.core.HazelcastInstance;
 import org.example.data.GroupData;
 import org.example.data.GroupHandler;
+import org.example.message.LogMessage;
+import org.example.message.Message;
+import org.example.message.MessageType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.util.SerializationUtils;
+import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 @Component
-public class WebsocketHandler extends TextWebSocketHandler {
+public class WebsocketHandler<T> extends TextWebSocketHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger(WebsocketHandler.class);
     private static final String GROUP = "group";
-
     private final HazelcastInstance hazelcastInstance;
     private final GroupHandler groupHandler;
 
     public WebsocketHandler(HazelcastInstance hazelcastInstance, GroupHandler groupHandler) {
         this.hazelcastInstance = hazelcastInstance;
         this.groupHandler = groupHandler;
+    }
+
+    @Override
+    public void handleBinaryMessage(WebSocketSession session, BinaryMessage message) {
+        try {
+            Message m = (Message) SerializationUtils.deserialize(message.getPayload().array());
+            if (m != null && m.getType() == MessageType.LOG) {
+                var logMessage = (LogMessage) m;
+                var map = hazelcastInstance.getMap(logMessage.getGroup());
+                map.lock(logMessage.getEventId());
+                if (!map.containsKey(logMessage.getEventId())) {
+                    map.put(logMessage.getEventId(), logMessage.getFrom());
+                } else {
+                    session.sendMessage(new TextMessage(logMessage.getEventId() + " is already taken by " + logMessage.getFrom()));
+                }
+                map.unlock(logMessage.getEventId());
+            } else {
+                LOGGER.warn("Invalid message received in session " + session.getId());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
     }
 
     @Override
@@ -53,7 +80,7 @@ public class WebsocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
-        var groupName= (String) session.getAttributes().get(GROUP);
+        var groupName = (String) session.getAttributes().get(GROUP);
         var groupMap = hazelcastInstance.getMap(groupName);
         groupMap.lock(groupName);
         var existingGroup = (GroupData) groupMap.get(groupName);

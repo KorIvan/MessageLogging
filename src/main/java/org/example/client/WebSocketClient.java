@@ -2,52 +2,55 @@ package org.example.client;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.Response;
 import okhttp3.WebSocket;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Random;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
+import java.io.IOException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-public class WebSocketClient {
+public record WebSocketClient(String name, String group, OkHttpClient okHttpClient, WebSocket webSocket,
+                              MyWebSocketListener listener) {
+    private static final Logger LOGGER = LoggerFactory.getLogger(WebSocketClient.class);
+    static ScheduledExecutorService executor = Executors.newScheduledThreadPool(10);
 
-    public static void main(String[] args) throws InterruptedException {
-        String groupA = "groupA";
-        int n = 10;
-        Random r = new Random();
-        Collection<Client> clients = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            clients.add(new Client("0" + i, groupA, r.nextInt(100)));
-        }
-        ExecutorService executor = Executors.newFixedThreadPool(n);
-        executor.invokeAll(clients, 100, TimeUnit.SECONDS);
-        executor.shutdown();
-        executor.awaitTermination(200, TimeUnit.SECONDS);
+    public boolean register() {
+        return webSocket.send(name + "@" + group);
     }
 
-    private static class Client implements Callable<Integer> {
-        String name;
-        String group;
-        int ttlSecs;
-        WebSocket webSocket;
-
-        public Client(String name, String group, int ttlSecs) {
-            this.name = name;
-            this.group = group;
-            this.ttlSecs = ttlSecs;
+    public void onReceiveEvent(int objectId) {
+        int assignedId = listener.getId();
+        if (objectId % assignedId == 0) {
+            provessEvent(objectId);
+        } else {
+            Future<?> f = executor.schedule(() -> processAfterDelay(objectId), objectId % assignedId, TimeUnit.SECONDS);
+            listener.addSubmitted(objectId, f);
         }
+    }
 
-        @Override
-        public Integer call() {
-            OkHttpClient client = new OkHttpClient();
-            Request request = new Request.Builder().url("ws://localhost:8080/ws").build();
-            MyWebSocketListener listener = new MyWebSocketListener();
-            WebSocket webSocket = client.newWebSocket(request, listener);
-            webSocket.send(name + "@" + group);
-            return 0;
+    private void provessEvent(int objectId) {
+        LOGGER.info("[{}] Started on id {}", name, objectId);
+        webSocket.send(String.valueOf(objectId));
+        LOGGER.info("[{}] Processed id {}", name, objectId);
+    }
+
+    public void processAfterDelay(int objectId) {
+        Request request = new Request.Builder()
+                .url(ClientManager.URL)
+                .build();
+        try (Response response = okHttpClient.newCall(request).execute()) {
+            var r = response.body() != null ? response.body().string() : "";
+            if (r.isBlank()) {
+                provessEvent(objectId);
+            } else {
+                LOGGER.info("[{}] Skipping event {} due to taken to work by {}", name, objectId, r);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 }
